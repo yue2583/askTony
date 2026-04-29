@@ -1,22 +1,27 @@
 """根据 last_updated_at 过滤 n 天内有更新的仓库"""
+import time
 from datetime import datetime, timedelta, timezone
 from asktony.cnb_client import CNBClient
 from asktony.commands.ingest import _safe_api_call, _repo_key
 from asktony.config import load_config
 
+cfg = load_config()
+client = CNBClient.from_config(cfg)
 
-def filter_repos_by_days(n_days: int) -> list[dict]:
+
+def filter_repos_by_days(n_days: int, verbose: bool = False) -> list[dict]:
     """过滤出最近 n 天内有更新的仓库
 
     Args:
         n_days: 天数阈值
+        verbose: 是否打印详情
 
     Returns:
         最近 n 天内更新的仓库完整信息列表
     """
-    cfg = load_config()
-    client = CNBClient.from_config(cfg)
+    start = time.time()
     repos = client.get_group_sub_repos(cfg.cnb_group)
+    print(f"已获取 {len(repos)} 个仓库信息，耗时 {time.time() - start:.2f}s")
 
     now = datetime.now(timezone.utc)
     threshold = now - timedelta(days=n_days)
@@ -35,9 +40,10 @@ def filter_repos_by_days(n_days: int) -> list[dict]:
             filtered.append(repo)
 
     # 打印过滤后的仓库名称
-    print(f"\n最近 {n_days} 天内有更新的仓库 ({len(filtered)} 个):")
-    for repo in filtered:
-        print(f"{repo.get('web_url', 'unknow_web_url')}")
+    print(f"最近 {n_days} 天内有更新的仓库 ({len(filtered)} 个):")
+    if verbose:
+        for repo in filtered:
+            print(f"{repo.get('web_url', 'unknow_web_url')}")
 
     return filtered
 
@@ -50,11 +56,6 @@ def fetch_and_print_commits(repos: list[dict], n_days: int = 30, verbose: bool =
         n_days: 天数阈值，用于计算 since 时间
         verbose: 是否打印详情
     """
-    import httpx
-    from typing import Any
-
-    cfg = load_config()
-    client = CNBClient.from_config(cfg)
 
     # 计算 since 时间
     since = datetime.now(timezone.utc) - timedelta(days=n_days)
@@ -66,51 +67,56 @@ def fetch_and_print_commits(repos: list[dict], n_days: int = 30, verbose: bool =
             print(f"缺少 repo_id repo={repo}")
             continue
 
+        start = time.time()
         commits_r = _safe_api_call(
             lambda: client.list_commits(repo_id, since=since),
             label="commits",
             repo=repo_id,
+            verbose=verbose,
         )
 
         if commits_r["ok"]:
             commits = commits_r.get("items", [])
+            if verbose:
+                print(f"已获取 {len(commits)} 个 commit，耗时 {time.time() - start:.2f}s {repo_id} ")
             for commit in commits:
-                # todo 过滤出大于since的时间，时间形式为："date": "2026-04-29T17:59:54+08:00"
                 sha = commit.get("sha")
-                p_sha = commits.get("parents", [])
+                p_sha = commit.get("parents", [])
+                commit_type = "common"
                 if len(p_sha) == 2:
                     # 说明是 merge commit
-                    continue
+                    p_sha = p_sha[0].get("sha") + "..." + p_sha[1].get("sha")
+                    commit_type = "merge"
                 elif len(p_sha) == 1:
                     p_sha = p_sha[0].get("sha")
-                    continue
                 else:
                     # 为0，说明是初始提交
                     p_sha = ""
-                name = commit.get("author", {}).get("name") \
-                       or commit.get("committer", {}).get("name") \
+                    commit_type = "init"
+                name = commit.get("commit", {}).get("author", {}).get("name") \
+                       or commit.get("commit", {}).get("committer", {}).get("name") \
                        or commit.get("author", {}).get("username") \
                        or commit.get("committer", {}).get("username")
-                email = commit.get("author", {}).get("email") \
-                        or commit.get("committer", {}).get("email") \
+                email = commit.get("commit", {}).get("author", {}).get("email") \
+                        or commit.get("commit", {}).get("committer", {}).get("email") \
                         or commit.get("author", {}).get("email") \
                         or commit.get("committer", {}).get("email")
-                data = commit.get("author", {}).get("date") \
-                       or commit.get("committer", {}).get("date")
+                data = commit.get("commit", {}).get("author", {}).get("date") \
+                       or commit.get("commit", {}).get("committer", {}).get("date")
                 repo_commits.append(
-                    (repo_id, name, email, data, sha, p_sha)
+                    (name, email, data, sha, p_sha, commit_type)
                 )
         else:
             print(f"\n{repo_id} - 获取失败: {commits_r.get('error', 'unknown error')}")
         result.append(
             (repo_id, repo_commits)
         )
-        break
+    return result
 
 
 def main():
-    repos = filter_repos_by_days(30)
-    fetch_and_print_commits(repos, n_days=30, verbose=True)
+    repos = filter_repos_by_days(30, verbose=False)
+    repo_commits = fetch_and_print_commits(repos, n_days=30, verbose=True)
 
 
 if __name__ == "__main__":
