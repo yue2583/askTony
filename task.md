@@ -1,1 +1,8 @@
-现在tmp.py拉到了很多仓库信息，每个仓库有个key包含【'last_updated_at': '2026-04-29T09:43:31Z',】你根据这个值解析和过滤出30天内有更新的仓库，打印缺少字段和最终过滤完成的仓库名称，封装一个方法，输入n天
+模仿ingest.py的
+【
+commits_r = _safe_api_call(
+            lambda: client.list_commits(repo_id, since=since), label="commits", repo=repo_id, verbose=verbose
+        )
+】
+代码，调整tmp.py，filter_repos_by_days逻辑不变，仅改变返回为repo的完整信息，
+然后编写和调用第二个方法：传入repos，用第一个获取commits，打印前5个commits信息
