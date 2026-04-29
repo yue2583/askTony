@@ -1,8 +1,5 @@
-模仿ingest.py的
-【
-commits_r = _safe_api_call(
-            lambda: client.list_commits(repo_id, since=since), label="commits", repo=repo_id, verbose=verbose
-        )
-】
-代码，调整tmp.py，filter_repos_by_days逻辑不变，仅改变返回为repo的完整信息，
-然后编写和调用第二个方法：传入repos，用第一个获取commits，打印前5个commits信息
+阅读和理解【src/asktony/commands/ingest.py:407】和【tmp.main】
+
+参考前者的逻辑，在后者新增方法：创建线程池，并发查询获取commit的新增，删除，变更数量增加到repo_commits的每个commit上去。
+打印返回值。
+不运行脚本，我来运行
