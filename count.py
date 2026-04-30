@@ -1,7 +1,13 @@
-"""根据 last_updated_at 过滤 n 天内有更新的仓库"""
+"""
+统计 cnb 提交信息，可指定统计最近 n 天
+默认从 data/member_info.xlsx 读取成员信息
+默认将结果输出到 data/{n}days_result.xlsx
+"""
+
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from tqdm.auto import tqdm
 from asktony.cnb_client import CNBClient
 from asktony.commands.ingest import _safe_api_call, _repo_key, _sum_add_del_from_compare
 from asktony.config import load_config
@@ -9,6 +15,85 @@ from asktony.config import load_config
 cfg = load_config()
 client = CNBClient.from_config(cfg)
 ex = ThreadPoolExecutor(max_workers=8)
+
+from pathlib import Path
+
+import pandas as pd
+
+
+def match_and_aggregate(input_path: str | Path, commit_data: list, output_path: str | Path,
+                        verbose=False) -> pd.DataFrame:
+    """根据 email 匹配 commit 数据，根据email关联full_name，输出统计报表
+
+    Args:
+        input_path: 输入 xlsx 路径，包含 full_name, email1, email2, email3 四列
+        commit_data: commit 数据列表，格式为 [(repo_id, name, email, date, sha, p_sha, commit_type, additions, deletions, changed_lines, file_count), ...]
+        output_path: 输出 xlsx 路径
+        verbose: 是否打印详情
+
+    Returns:
+        包含 full_name, commit_count, change_lines 的 DataFrame，按 commit_count 降序
+    """
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+
+    # 读取输入文件
+    df_input = pd.read_excel(input_path)
+    # 构建 email -> full_name 的映射（支持多个 email 字段）
+    email_to_name: dict[str, str] = {}
+    for _, row in df_input.iterrows():
+        full_name = row["full_name"]
+        for col in ["email1", "email2", "email3"]:
+            if col in df_input.columns and pd.notna(row[col]):
+                email_to_name[row[col].strip()] = full_name
+
+    # 统计每个 email 对应的 commit_count 和 change_lines
+    email_stats: dict[str, dict] = {}
+    for item in commit_data:
+        repo_id, name, email, date, sha, p_sha, commit_type, additions, deletions, changed_lines, file_count = item
+        if not email and verbose:
+            print(f"- 缺少 email item={item}")
+            continue
+
+        if email not in email_stats:
+            email_stats[email] = {"commit_count": 0, "change_lines": 0}
+        email_stats[email]["commit_count"] += 1
+        # change_lines = additions + deletions（如果为 None 则按 0 计算）
+        change_lines_val = changed_lines if changed_lines is not None else (additions or 0) + (deletions or 0)
+        email_stats[email]["change_lines"] += change_lines_val
+
+    # email -> stat 构造为 full_name -> stat
+    name_stats: dict[str, dict] = {}
+    for email, stats in email_stats.items():
+        full_name = email_to_name.get(email)
+        if not full_name:
+            if verbose:
+                print(f"- 缺少 full_name email={email}")
+            continue
+        if full_name in name_stats:
+            new_stats = name_stats[full_name]
+        else:
+            new_stats = {"commit_count": 0, "change_lines": 0}
+        new_stats["commit_count"] += stats["commit_count"]
+        new_stats["change_lines"] += stats["change_lines"]
+        name_stats[full_name] = new_stats
+    rows = []
+    for name, stats in name_stats.items():
+        rows.append({
+            "full_name": name,
+            "commit_count": stats["commit_count"],
+            "change_lines": stats["change_lines"],
+        })
+
+    # 构建输出 DataFrame 并按 commit_count 降序排列
+    df_output = pd.DataFrame(rows)
+    df_output = df_output.sort_values("commit_count", ascending=False).reset_index(drop=True)
+
+    # 输出到 xlsx
+    df_output.to_excel(output_path, index=False)
+    print(f"已输出到{output_path}")
+    return df_output
+
 
 def filter_repos_by_days(n_days: int, verbose: bool = False) -> list[dict]:
     """过滤出最近 n 天内有更新的仓库
@@ -47,6 +132,7 @@ def filter_repos_by_days(n_days: int, verbose: bool = False) -> list[dict]:
             print(f"{repo.get('web_url', 'unknow_web_url')}")
 
     return filtered
+
 
 def fetch_commits(since, repo, verbose):
     repo_commits = []
@@ -115,12 +201,13 @@ def fetch_and_print_commits(repos: list[dict], n_days: int = 30, verbose: bool =
     for repo in repos:
         f = ex.submit(fetch_commits, since, repo, verbose)
         futures.append(f)
-    for fut in as_completed(futures):
+    for fut in tqdm(as_completed(futures), "fetch repo commits"):
         repo_id, repo_commits = fut.result()
         if repo_commits is None:
             continue
         result.append((repo_id, repo_commits))
     return result
+
 
 def compute_one(repo_id: str, commit):
     name, email, data, sha, p_sha, commit_type = commit
@@ -138,6 +225,7 @@ def compute_one(repo_id: str, commit):
         print(f"{repo_id} compare 跳过：error={e}")
         additions, deletions, changed_lines, file_count = None, None, None, None
     return (repo_id,) + commit + (additions, deletions, changed_lines, file_count)
+
 
 def add_commit_stats(repo_commits: list):
     """为每个 commit 并发查询 additions/deletions/changed_lines 统计
@@ -159,7 +247,7 @@ def add_commit_stats(repo_commits: list):
         for commit in commits:
             f = ex.submit(compute_one, repo_id, commit)
             futures.append(f)
-    for fut in as_completed(futures):
+    for fut in tqdm(as_completed(futures), "fill commit stats"):
         results.append(fut.result())
 
     print(f"成功获取 {len(results)} 条 commit stats")
@@ -168,22 +256,15 @@ def add_commit_stats(repo_commits: list):
 
 def main():
     n_days = 30
-    repos = filter_repos_by_days(n_days, verbose=False)
-    repo_commits = fetch_and_print_commits(repos, n_days=n_days, verbose=True)
+    input_path = "data/member_info.xlsx"
+    output_path = f"data/{n_days}days_result.xlsx"
+    verbose = True
+    repos = filter_repos_by_days(n_days, verbose=verbose)
+    repo_commits = fetch_and_print_commits(repos, n_days=n_days, verbose=verbose)
     stats = add_commit_stats(repo_commits)
-    print(stats)
+    df = match_and_aggregate(input_path, stats, output_path, verbose=verbose)
+    pass
 
-
-def test_compare_commits():
-    repo = "clife/nlp/clife-ai-nlp-agentskill"
-    head = "d4aa66026932df516c771671d86d735ed253bf12"
-    base = ""
-    resp = client.compare_commits(repo, base, head)
-    additions, deletions, changed_lines = _sum_add_del_from_compare(resp)
-    files = resp.get("files") if isinstance(resp, dict) else None
-    file_count = len(files) if isinstance(files, list) else None
-    print()
 
 if __name__ == "__main__":
     main()
-    # test_compare_commits()
