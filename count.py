@@ -134,7 +134,7 @@ def filter_repos_by_days(n_days: int, verbose: bool = False) -> list[dict]:
     return filtered
 
 
-def fetch_commits(since, repo, verbose):
+def fetch_commits(since, repo, verbose, observe_member_email, observe_cnb_repo):
     repo_commits = []
     repo_id = _repo_key(repo)
     if not repo_id:
@@ -147,6 +147,8 @@ def fetch_commits(since, repo, verbose):
         repo=repo_id,
         verbose=verbose,
     )
+
+    logs = {"email_observe": [], "repo_observe": []}
 
     if commits_r["ok"]:
         commits = commits_r.get("items", [])
@@ -179,33 +181,50 @@ def fetch_commits(since, repo, verbose):
             repo_commits.append(
                 (name, email, data, sha, p_sha, commit_type)
             )
-        return repo_id, repo_commits
+            if observe_member_email and email == observe_member_email:
+                logs["email_observe"].append(f"{repo_id} - {name} - {email} - {data} - {sha} - {p_sha} - {commit_type}")
+            if observe_cnb_repo and repo_id == observe_cnb_repo:
+                logs["repo_observe"].append(f"{repo_id} - {name} - {email} - {data} - {sha} - {p_sha} - {commit_type}")
+        return repo_id, repo_commits, logs
     else:
         print(f"\n{repo_id} - 获取失败: {commits_r.get('error', 'unknown error')}")
-        return repo_id, None
+        return repo_id, None, None
 
 
-def fetch_and_print_commits(repos: list[dict], n_days: int = 30, verbose: bool = False):
+def fetch_and_print_commits(repos: list[dict], n_days: int = 30, verbose: bool = False, observe_member_email=None,
+                            observe_cnb_repo=None):
     """获取仓库的commits并打印前5条
 
     Args:
         repos: 仓库完整信息列表
         n_days: 天数阈值，用于计算 since 时间
         verbose: 是否打印详情
+        observe_member_email: 观察的成员邮箱
+        observe_cnb_repo: 观察的仓库
     """
 
     # 计算 since 时间
     since = datetime.now(timezone.utc) - timedelta(days=n_days)
     result = []
     futures = []
+    logs = {}
     for repo in repos:
-        f = ex.submit(fetch_commits, since, repo, verbose)
+        f = ex.submit(fetch_commits, since, repo, verbose, observe_member_email, observe_cnb_repo)
         futures.append(f)
     for fut in tqdm(as_completed(futures), "fetch repo commits"):
-        repo_id, repo_commits = fut.result()
+        repo_id, repo_commits, _logs = fut.result()
+        if _logs:
+            for k, v in _logs.items():
+                if k not in logs:
+                    logs[k] = v
+                else:
+                    logs[k].extend(v)
         if repo_commits is None:
             continue
         result.append((repo_id, repo_commits))
+    for k, v in logs.items():
+        msg = "\n".join(v)
+        print(f"{k}: \n{msg}")
     return result
 
 
@@ -259,8 +278,14 @@ def main():
     input_path = "data/member_info.xlsx"
     output_path = f"data/{n_days}days_result.xlsx"
     verbose = True
+    observe_member_email = None
+    # observe_member_email = "gavinwangxin@163.com"
+    observe_cnb_repo = None
+    # observe_cnb_repo = "clife/computer_vision_beauty/clife-ai-cv-magnifier-analysis"
     repos = filter_repos_by_days(n_days, verbose=verbose)
-    repo_commits = fetch_and_print_commits(repos, n_days=n_days, verbose=verbose)
+    repo_commits = fetch_and_print_commits(repos, n_days=n_days, verbose=verbose,
+                                           observe_member_email=observe_member_email, observe_cnb_repo=observe_cnb_repo)
+    # 以下为统计行数
     stats = add_commit_stats(repo_commits)
     df = match_and_aggregate(input_path, stats, output_path, verbose=verbose)
     pass
